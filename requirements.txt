@@ -1,0 +1,57 @@
+# 金融研报自动生成系统依赖包
+# 更新日期：2025年6月8日
+
+# ========== 核心依赖 ==========
+# 环境配置
+python-dotenv>=1.0.0
+
+# 数据分析核心库
+pandas>=2.0.0
+numpy>=1.21.0
+
+# ========== 数据可视化 ==========
+matplotlib>=3.5.0
+seaborn>=0.12.0
+pillow>=8.0.0
+
+# ========== AI大模型 ==========
+openai>=1.0.0
+
+# ========== 网络请求与数据采集 ==========
+requests>=2.25.0
+aiofiles>=23.1.0
+k-sogou-search
+
+# ========== 网页解析与搜索 ==========
+beautifulsoup4>=4.9.0
+lxml>=4.6.0
+duckduckgo-search>=3.0.0
+
+# ========== 金融数据接口 ==========
+akshare>=1.12.0
+efinance>=0.5.0
+
+# ========== 数据处理与分析 ==========
+duckdb>=0.8.0
+
+# ========== 文档处理 ==========
+pyyaml>=6.0
+markdown>=3.4.0
+python-docx>=0.8.11
+mdformat
+# ========== 工作流引擎 ==========
+# pocketflow  # 轻量级工作流引擎（如需要请手动安装）
+
+# ========== 系统工具 ==========
+# 注意：以下包为Python标准库，无需安装
+# os, glob, time, json, datetime, re, shutil
+# urllib.parse, ast, typing, dataclasses
+# asyncio, importlib, http.client
+
+# ========== Jupyter Notebook支持 ==========
+ipython>=7.0.0
+
+# ========== 开发工具（可选） ==========
+# pytest>=6.0.0
+# black>=21.0.0
+# flake8>=3.9.0

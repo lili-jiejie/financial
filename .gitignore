@@ -1,2 +1,4 @@
 .env
 run_report.py
+__pycache__/*.pyc
+*.pyo

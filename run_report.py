@@ -1,4 +1,0 @@
-from integrated_research_report_generator import IntegratedResearchReportGenerator
-
-generator = IntegratedResearchReportGenerator()
-generator.run_full_pipeline()

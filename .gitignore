@@ -2,3 +2,7 @@
 run_report.py
 __pycache__/*.pyc
 *.pyo
+outputs/inputs/
+.venv/
+.venv_clean/
+**/__pycache__/

@@ -53,7 +53,10 @@ graph TB
         O --> Q
         P --> R[深度研报生成器]
         Q --> R
-        R --> S[最终研报输出]
+        A --> X[A股公开卖方研报检索]
+        X --> Y[原文引句核验与风险对照]
+        R --> Y
+        Y --> S[最终研报输出]
     end
     
     subgraph "输出格式"
@@ -100,7 +103,8 @@ financial_research_report/
 │       ├── get_shareholder_info.py        # 股东信息获取
 │       ├── get_stock_intro.py             # 股票介绍获取
 │       ├── identify_competitors.py        # 竞争对手识别
-│       └── search_info.py                 # 信息搜索
+│       ├── search_info.py                 # 信息搜索
+│       └── sell_side_review.py            # 公开卖方研报检索与风险对照
 ├── 📁 工作流框架
 │   └── pocketflow/                         # 轻量级工作流引擎
 │       └── __init__.py
@@ -119,6 +123,9 @@ financial_research_report/
 │       └── all_search_results.json        # 搜索结果汇总
 ├── 📁 输出结果
 │   └── outputs/                            # 生成的报告和图表
+│       ├── inputs/[市场]_[代码]_[运行时间]/   # 本次运行的数据输入
+│       ├── sell_side_demo_300750.md       # 无模型密钥的公开来源示例
+│       ├── sell_side_no_coverage_demo_600478.md # 无公开覆盖示例
 │       └── session_[ID]/                   # 按会话分组的输出
 │           ├── 经营活动现金流趋势.png
 │           ├── 净利润趋势.png
@@ -158,18 +165,21 @@ financial_research_report/
 
 ### 环境要求
 
-- Python 3.8+
+- Python 3.10+
 - OpenAI API密钥（或兼容的LLM服务）
 
 ### 安装步骤
 
-2. **安装依赖**
+1. **安装依赖**
 
 ```bash
-pip install -r requirements.txt
+python -X utf8 -m pip install -r requirements.txt
 ```
 
-3. **环境配置**
+`-X utf8` 可避免 Windows 默认 GBK 环境读取含中文注释的依赖文件时解码失败。
+如需 Word 输出，还需在系统中安装 Pandoc；未安装时仍会保留 Markdown 报告。
+
+2. **环境配置**
 创建 `.env` 文件并配置以下变量：
 
 ```env
@@ -180,18 +190,10 @@ OPENAI_MODEL=gpt-4
 
 ## 🎮 使用指南
 
-### 基础研报生成
+### 基础研报生成（不追加卖方章节）
 
-```python
-from research_report_generator import generate_report
-
-# 配置目标公司
-target_company = "商汤科技"
-target_company_code = "00020"
-target_company_market = "HK"
-
-# 生成研报
-generate_report(target_company, target_company_code, target_company_market)
+```bash
+python integrated_research_report_generator.py --code 300750 --no-sell-side-review
 ```
 
 ### 整合式研报生成
@@ -205,6 +207,29 @@ generator = IntegratedResearchReportGenerator()
 # 运行完整流程
 generator.run_full_pipeline()
 ```
+
+### A 股卖方研报自动对照与风险补充
+
+在原有整合式生成器的最后一步追加一节：按股票代码检索最近的公开个股研报，尽量读取可公开访问的 PDF 或网页正文，再对照刚生成的研报，列出有原文依据的观点与风险线索。无需手动上传卖方 PDF。支持沪深 A 股与北交所 `92` 号段代码的自动识别；未取得公开卖方正文时仍会明确标注覆盖不足。
+
+```bash
+# 完整流程：只输入 A 股代码，自动识别公司名称并生成研报与补充章节
+python integrated_research_report_generator.py --code 300750
+
+# 只运行新模块，检查公开研报来源；已有自生成研报时可传 --report 做对照
+python -m utils.sell_side_review 300750 --as-of 2026-10-01 --days 90 --max-reports 3 --sources-only
+python -m utils.sell_side_review 300750 --report 自己生成的研报.md
+```
+
+完整流程需要 `.env` 中配置可用的 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`。独立模块未配置模型或指定 `--sources-only` 时只列来源，不编造观点或风险判断；`--sources-only` 仍会检查公开正文是否可读，但即使已配置密钥也不会调用模型。默认对照最近 90 天内最多三家不同券商；`--as-of` 可固定检索截止日，完整流程还支持 `--sell-side-days`、`--sell-side-max-reports` 和 `--no-sell-side-review`。`--as-of` 只是日期过滤，不是历史时点的数据快照，不能直接用于无前瞻信息的回测。
+
+[宁德时代公开研报来源示例](outputs/sell_side_demo_300750.md)和[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)展示了两种真实结果。港股代码也可自动识别公司名称，但卖方正文自动检索目前仅接入 A 股；港股报告会明确显示未覆盖提示。
+
+默认数据源是东方财富公开研报聚合索引，并非各券商的登录研究平台。输出明确标注“仅标题与元数据”“公开网页节选”或“PDF 文字节选”；表内日期是索引日期，可能与 PDF 封面日期不同。网页/PDF 节选不等于完整报告，PDF 提取还可能错读表格和数字，公开索引也不保证覆盖所有券商及付费研报。公开 PDF 若返回验证页面或无法提取文字，会回退到网页节选；两者都不可读时仅列来源，不进行内容比较。程序不绕过登录、付费墙或反爬验证。公开可读不等于可批量采集、再分发或传给外部模型，正式部署前需要核对来源条款与团队的数据处理权限；取得授权数据后，可实现 `utils/sell_side_review.py` 的 `SellSideProvider` 接口并通过生成器的 `sell_side_provider` 参数接入。
+
+风险补充按“风险点—可能的影响路径—后续监测项”组织；卖方乐观假设核查点和券商之间的差异线索都要求保留实际来源与可在取得的正文中找到的原文引句。与原研报的一致或分歧还要求能找到原研报原句。公开资料不足时不会把“预测偏乐观”直接判成“卖方夸大”，也不会编造风险概率或等级。最终结论仍需研究员结合公司公告、财报和预测时点复核。
+
+新功能的离线回归检查可运行 `python -m pytest -q`（需另装 `pytest`）。
 
 ### 行业研究工作流
 

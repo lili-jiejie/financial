@@ -1,6 +1,29 @@
+import re
+from typing import Literal, Optional
+
 import akshare as ak
-import pandas as pd
-from typing import Optional, Literal
+
+
+def normalize_hk_code(symbol: str) -> str:
+    """Normalize common HK code spellings to five digits."""
+    value = str(symbol).strip().upper().removeprefix('HK').removesuffix('.HK')
+    if not re.fullmatch(r'\d{1,5}', value):
+        raise ValueError('港股股票代码应为五位以内数字，例如 00700')
+    return value.zfill(5)
+
+
+def lookup_hk_company(symbol: str) -> str:
+    """Resolve the HK company name before a code-only full report run."""
+    code = normalize_hk_code(symbol)
+    try:
+        profile = ak.stock_hk_company_profile_em(symbol=code)
+        if profile is not None and not profile.empty and '公司名称' in profile.columns:
+            name = str(profile.iloc[0]['公司名称']).strip()
+            if name and name.lower() != 'nan':
+                return name
+    except Exception as exc:
+        raise ValueError(f'无法自动识别港股 {code} 的公司名称，可用 --company 指定') from exc
+    raise ValueError(f'无法自动识别港股 {code} 的公司名称，可用 --company 指定')
 
 def get_stock_intro(symbol: str = "000066", market: Literal["A", "HK"] = "A") -> Optional[str]:
     """
@@ -13,7 +36,7 @@ def get_stock_intro(symbol: str = "000066", market: Literal["A", "HK"] = "A") ->
     # A股
     if market == "A":
         # 去掉A股代码的SH/SZ前缀
-        clean_symbol = symbol.replace('SH', '').replace('SZ', '')
+        clean_symbol = symbol.removeprefix('SH').removeprefix('SZ').removeprefix('BJ')
         try:
             df = ak.stock_zyjs_ths(symbol=clean_symbol)
             if df is not None and not df.empty:

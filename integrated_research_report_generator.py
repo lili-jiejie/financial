@@ -13,9 +13,9 @@ import yaml
 import re
 import shutil
 import requests
-from datetime import datetime
+import sys
+from datetime import date, datetime
 from dotenv import load_dotenv
-import importlib
 from urllib.parse import urlparse
 
 from data_analysis_agent import quick_analysis
@@ -24,14 +24,77 @@ from data_analysis_agent.utils.llm_helper import LLMHelper
 from utils.get_shareholder_info import get_shareholder_info, get_table_content
 from utils.get_financial_statements import get_all_financial_statements, save_financial_statements_to_csv
 from utils.identify_competitors import identify_competitors_with_ai
-from utils.get_stock_intro import get_stock_intro, save_stock_intro_to_txt
-from duckduckgo_search import DDGS
+from utils.get_stock_intro import (
+    get_stock_intro,
+    lookup_hk_company,
+    normalize_hk_code,
+)
 from utils.search_engine import SearchEngine
+from utils.sell_side_review import (
+    build_sell_side_review,
+    lookup_a_share_company,
+    normalize_a_share_code,
+)
+
+
+def a_share_financial_code(code):
+    """AkShare financial statements require an exchange-qualified symbol."""
+    clean_code = normalize_a_share_code(code)
+    prefix = "BJ" if clean_code.startswith(("4", "8", "92")) else (
+        "SH" if clean_code.startswith(("6", "9")) else "SZ"
+    )
+    return f"{prefix}{clean_code}"
+
+
+def normalize_listed_competitors(raw_companies):
+    """Keep only usable A/HK peers from the model's untrusted YAML output."""
+    result = []
+    seen = set()
+    for company in raw_companies or []:
+        if not isinstance(company, dict):
+            continue
+        name = str(company.get("name") or "").strip()
+        code = str(company.get("code") or "").strip().upper()
+        market_text = str(company.get("market") or "").strip().upper()
+        if not name or any(ord(char) < 32 or char in '\\/:*?"<>|' for char in name):
+            continue
+        if market_text in ("A", "A股"):
+            try:
+                code = normalize_a_share_code(code)
+            except ValueError:
+                continue
+            code = a_share_financial_code(code)
+            market = "A"
+        elif market_text in ("HK", "港股"):
+            code = code.removeprefix("HK")
+            if not re.fullmatch(r"\d{1,5}", code):
+                continue
+            code = code.zfill(5)
+            market = "HK"
+        else:
+            continue
+        key = market, code
+        if key not in seen:
+            result.append({"name": name, "code": code, "market": market})
+            seen.add(key)
+    return result
+
 
 class IntegratedResearchReportGenerator:
     """整合的研报生成器类"""
     
-    def __init__(self, target_company="商汤科技", target_company_code="00020", target_company_market="HK", search_engine="ddg"):
+    def __init__(
+        self,
+        target_company="商汤科技",
+        target_company_code="00020",
+        target_company_market="HK",
+        search_engine="ddg",
+        enable_sell_side_review=True,
+        sell_side_days=90,
+        sell_side_max_reports=3,
+        sell_side_as_of=None,
+        sell_side_provider=None,
+    ):
         # 环境变量与全局配置
         load_dotenv()
         self.api_key = os.getenv("OPENAI_API_KEY")
@@ -39,18 +102,44 @@ class IntegratedResearchReportGenerator:
         self.model = os.getenv("OPENAI_MODEL", "gpt-4")
         # 打印模型
         print(f"🔧 使用的模型: {self.model}")
-        self.target_company = target_company
-        self.target_company_code = target_company_code
-        self.target_company_market = target_company_market
+        self.target_company = str(target_company).strip()
+        if not self.target_company or any(
+            ord(char) < 32 or char in '\\/:*?"<>|'
+            for char in self.target_company
+        ):
+            raise ValueError("公司名称为空或包含不能用于文件名的字符")
+        self.target_company_market = str(target_company_market).upper()
+        if self.target_company_market == "A":
+            self.target_company_code = normalize_a_share_code(target_company_code)
+        elif self.target_company_market == "HK":
+            self.target_company_code = normalize_hk_code(target_company_code)
+        else:
+            raise ValueError("仅支持 A 股或港股市场")
+        if not 1 <= sell_side_days <= 365:
+            raise ValueError("sell_side_days 必须在 1 至 365 之间")
+        if not 1 <= sell_side_max_reports <= 20:
+            raise ValueError("sell_side_max_reports 必须在 1 至 20 之间")
+        self.enable_sell_side_review = enable_sell_side_review
+        self.sell_side_days = sell_side_days
+        self.sell_side_max_reports = sell_side_max_reports
+        self.sell_side_as_of = sell_side_as_of
+        self.sell_side_provider = sell_side_provider
         
         # 搜索引擎配置
         self.search_engine = SearchEngine(search_engine)
         print(f"🔍 搜索引擎已配置为: {search_engine.upper()}")
         
         # 目录配置
-        self.data_dir = "./download_financial_statement_files"
-        self.company_info_dir = "./company_info"
-        self.industry_info_dir = "./industry_info"
+        # Keep one run's inputs separate from checked-in examples and other stocks.
+        run_id = (
+            f"{self.target_company_market}_{self.target_company_code}_"
+            f"{datetime.now():%Y%m%d_%H%M%S_%f}"
+        )
+        self.run_id = run_id
+        self.run_dir = os.path.join("outputs", "inputs", run_id)
+        self.data_dir = os.path.join(self.run_dir, "financials")
+        self.company_info_dir = os.path.join(self.run_dir, "company_info")
+        self.industry_info_dir = os.path.join(self.run_dir, "industry_info")
         
         # 创建必要的目录
         for dir_path in [self.data_dir, self.company_info_dir, self.industry_info_dir]:
@@ -83,19 +172,34 @@ class IntegratedResearchReportGenerator:
             model_name=self.model,
             company_name=self.target_company
         )
-        listed_companies = [company for company in other_companies if company.get('market') != "未上市"]
+        listed_companies = normalize_listed_competitors(other_companies)
+        target_code = (
+            normalize_a_share_code(self.target_company_code)
+            if self.target_company_market == "A" else self.target_company_code.zfill(5)
+        )
+        listed_companies = [
+            company for company in listed_companies
+            if not (
+                company["market"] == self.target_company_market
+                and company["code"].removeprefix("SH").removeprefix("SZ").removeprefix("BJ")
+                == target_code
+            )
+        ]
         
         # 2. 获取目标公司财务数据
         print(f"\n📊 获取目标公司 {self.target_company} 的财务数据...")
+        target_financial_code = self.target_company_code
+        if self.target_company_market == "A":
+            target_financial_code = a_share_financial_code(self.target_company_code)
         target_financials = get_all_financial_statements(
-            stock_code=self.target_company_code,
+            stock_code=target_financial_code,
             market=self.target_company_market,
             period="年度",
             verbose=False
         )
         save_financial_statements_to_csv(
             financial_statements=target_financials,
-            stock_code=self.target_company_code,
+            stock_code=target_financial_code,
             market=self.target_company_market,
             company_name=self.target_company,
             period="年度",
@@ -108,17 +212,7 @@ class IntegratedResearchReportGenerator:
         for company in listed_companies:
             company_name = company.get('name')
             company_code = company.get('code')
-            market_str = company.get('market', '')
-            
-            if "A" in market_str:
-                market = "A"
-                if not (company_code.startswith('SH') or company_code.startswith('SZ')):
-                    if company_code.startswith('6'):
-                        company_code = f"SH{company_code}"
-                    else:
-                        company_code = f"SZ{company_code}"
-            elif "港" in market_str:
-                market = "HK"
+            market = company['market']
             
             print(f"  获取 {company_name}({market}:{company_code}) 的财务数据")
             try:
@@ -148,27 +242,16 @@ class IntegratedResearchReportGenerator:
         for company in listed_companies:
             company_name = company.get('name')
             company_code = company.get('code')
-            market_str = company.get('market', '')
-            if "A" in market_str:
-                market = "A"
-                if not (company_code.startswith('SH') or company_code.startswith('SZ')):
-                    if company_code.startswith('6'):
-                        company_code = f"SH{company_code}"
-                    else:
-                        company_code = f"SZ{company_code}"
-            elif "港" in market_str:
-                market = "HK"
+            market = company['market']
             all_base_info_targets.append((company_name, company_code, market))
-        
-        # 添加特定公司如百度
-        all_base_info_targets.append(("百度", "09888", "HK"))
         
         for company_name, company_code, market in all_base_info_targets:
             print(f"  获取 {company_name}({market}:{company_code}) 的基础信息")
             company_info = get_stock_intro(company_code, market=market)
             if company_info:
                 save_path = os.path.join(self.company_info_dir, f"{company_name}_{market}_{company_code}_info.txt")
-                save_stock_intro_to_txt(company_code, market, save_path)
+                with open(save_path, "w", encoding="utf-8") as output:
+                    output.write(company_info)
                 print(f"    信息已保存到: {save_path}")
             else:
                 print(f"    未能获取到 {company_name} 的基础信息")
@@ -214,7 +297,10 @@ class IntegratedResearchReportGenerator:
         merged_results = self.merge_reports(results, comparison_results)
         
         # 商汤科技估值与预测分析
-        sensetime_files = self.get_sensetime_files(self.data_dir)
+        sensetime_files = (
+            self.get_sensetime_files(self.data_dir)
+            if "商汤" in self.target_company else []
+        )
         sensetime_valuation_report = None
         if sensetime_files:
             sensetime_valuation_report = self.analyze_sensetime_valuation(sensetime_files, self.llm_config)
@@ -232,15 +318,27 @@ class IntegratedResearchReportGenerator:
         )
         
         # 整理股权信息
-        info = get_shareholder_info()
-        shangtang_shareholder_info = info.get("tables")
-        table_content = get_table_content(shangtang_shareholder_info)
-        shareholder_analysis = self.llm.call(
-            "请分析以下股东信息表格内容：\n" + table_content,
-            system_prompt="你是一个专业的股东信息分析师。",
-            max_tokens=16384,
-            temperature=0.5
-        )
+        try:
+            holder_code = (
+                self.target_company_code
+                if self.target_company_market == "A"
+                else f"HK{int(self.target_company_code):04d}"
+            )
+            info = get_shareholder_info(stock_code=holder_code)
+            tables = info.get("tables") or []
+        except (requests.RequestException, ValueError) as exc:
+            print(f"股东信息获取失败：{exc}")
+            tables = []
+        if tables:
+            table_content = get_table_content(tables)
+            shareholder_analysis = self.llm.call(
+                "请分析以下股东信息表格内容：\n" + table_content,
+                system_prompt="你是一个专业的股东信息分析师。",
+                max_tokens=16384,
+                temperature=0.5
+            )
+        else:
+            shareholder_analysis = "未取得该公司的可用股东结构表格。"
         
         # 整理行业信息搜索结果
         with open(search_results_file, 'r', encoding='utf-8') as f:
@@ -259,14 +357,14 @@ class IntegratedResearchReportGenerator:
         formatted_report = self.format_final_reports(merged_results)
         
         # 统一保存为markdown
-        md_output_file = f"财务研报汇总_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        md_output_file = f"财务研报汇总_{self.run_id}.md"
         with open(md_output_file, 'w', encoding='utf-8') as f:
             f.write(f"# 公司基础信息\n\n## 整理后公司信息\n\n{company_infos}\n\n")
             f.write(f"# 股权信息分析\n\n{shareholder_analysis}\n\n")
             f.write(f"# 行业信息搜索结果\n\n{search_res}\n\n")
             f.write(f"# 财务数据分析与两两对比\n\n{formatted_report}\n\n")
             if sensetime_valuation_report and isinstance(sensetime_valuation_report, dict):
-                f.write(f"# 商汤科技估值与预测分析\n\n{sensetime_valuation_report.get('final_report', '未生成报告')}\n\n")
+                f.write(f"# {self.target_company}估值与预测分析\n\n{sensetime_valuation_report.get('final_report', '未生成报告')}\n\n")
         
         print(f"\n✅ 第一阶段完成！基础分析报告已保存到: {md_output_file}")
         
@@ -291,7 +389,7 @@ class IntegratedResearchReportGenerator:
         # 处理图片路径
         print("🖼️ 处理图片路径...")
         new_md_path = md_file_path.replace('.md', '_images.md')
-        images_dir = os.path.join(os.path.dirname(md_file_path), 'images')
+        images_dir = os.path.join(os.path.dirname(md_file_path), 'images', self.run_id)
         self.extract_images_from_markdown(md_file_path, images_dir, new_md_path)
         
         # 加载报告内容
@@ -304,7 +402,7 @@ class IntegratedResearchReportGenerator:
         
         # 分段生成深度研报
         print("\n✍️ 开始分段生成深度研报...")
-        full_report = ['# 商汤科技公司研报\n']
+        full_report = [f'# {self.target_company}研究报告\n']
         prev_content = ''
         
         for idx, part in enumerate(parts):
@@ -320,12 +418,41 @@ class IntegratedResearchReportGenerator:
         
         # 保存最终报告
         final_report = '\n\n'.join(full_report)
-        output_file = f"深度财务研报分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        self.save_markdown(final_report, output_file)
-        
-        # 格式化和转换
+        output_file = f"深度财务研报分析_{self.run_id}.md"
+        with open(output_file, "w", encoding="utf-8") as output:
+            output.write(final_report)
+
+        # Format the original report first. Reformatting the appended source
+        # table can remove its escaped pipe characters and change citations.
         print("\n🎨 格式化报告...")
         self.format_markdown(output_file)
+        with open(output_file, "r", encoding="utf-8") as formatted:
+            final_report = formatted.read()
+        if self.enable_sell_side_review and self.target_company_market == "A":
+            try:
+                supplement = build_sell_side_review(
+                    code=self.target_company_code,
+                    original_report=final_report,
+                    llm=self.llm,
+                    provider=self.sell_side_provider,
+                    as_of=self.sell_side_as_of,
+                    lookback_days=self.sell_side_days,
+                    max_reports=self.sell_side_max_reports,
+                )
+                final_report = f"{final_report}\n\n{supplement}"
+            except Exception as exc:
+                print(f"卖方研报对照未完成：{exc}")
+                final_report += (
+                    "\n\n## 卖方研报对照与风险补充\n\n"
+                    "公开研报检索暂不可用，本节未生成观点或风险判断。"
+                )
+        elif self.enable_sell_side_review:
+            final_report += (
+                "\n\n## 卖方研报对照与风险补充\n\n"
+                "当前自动检索仅接入 A 股公开个股研报索引；"
+                "本股票暂无可核对的卖方正文，因此未生成观点或风险判断。"
+            )
+        self.save_markdown(final_report, output_file)
         
         print("\n📄 转换为Word文档...")
         self.convert_to_docx(output_file)
@@ -481,27 +608,21 @@ class IntegratedResearchReportGenerator:
     def get_background(self):
         """获取背景信息"""
         return '''
-本报告基于自动化采集与分析流程，涵盖如下环节：
-- 公司基础信息等数据均通过akshare、公开年报、主流财经数据源自动采集。
-- 财务三大报表数据来源：东方财富-港股-财务报表-三大报表 (https://emweb.securities.eastmoney.com/PC_HKF10/FinancialAnalysis/index)
-- 主营业务信息来源：同花顺-主营介绍 (https://basic.10jqka.com.cn/new/000066/operate.html)
-- 股东结构信息来源：同花顺-股东信息 (https://basic.10jqka.com.cn/HK0020/holder.html) 通过网页爬虫技术自动采集
-- 行业信息通过DuckDuckGo等公开搜索引擎自动抓取，引用了权威新闻、研报、公司公告等。
-- 财务分析、对比分析、估值与预测均由大模型（如GPT-4）自动生成，结合了行业对标、财务比率、治理结构等多维度内容。
-- 相关数据与分析均在脚本自动化流程下完成，确保数据来源可追溯、分析逻辑透明。
-- 详细引用与外部链接已在正文中标注。
-- 数据接口说明与免责声明见文末。
+本报告基于自动化采集与分析流程。公司、财务、股东及行业资料的实际来源应以本次检索记录为准。
+数值、预测与投资观点需要分别核对原始披露、计算过程与发布时间。
+卖方研报对照为补充材料，公开节选不代表报告全文。
 '''
     
     def generate_outline(self, llm, background, report_content):
         """生成大纲"""
         outline_prompt = f"""
-你是一位顶级金融分析师和研报撰写专家。请基于以下背景和财务研报汇总内容，生成一份详尽的《商汤科技公司研报》分段大纲，要求：
+你是一位金融分析师和研报撰写专家。请基于以下背景和财务研报汇总内容，生成一份详尽的《{self.target_company}研究报告》分段大纲，要求：
 - 以yaml格式输出，务必用```yaml和```包裹整个yaml内容，便于后续自动分割。
 - 每一项为一个主要部分，每部分需包含：
   - part_title: 章节标题
   - part_desc: 本部分内容简介
 - 章节需覆盖公司基本面、财务分析、行业对比、估值与预测、治理结构、投资建议、风险提示、数据来源等。
+- 目标公司仅为 {self.target_company}（{self.target_company_code}），同行数据只作为比较资料。
 - 只输出yaml格式的分段大纲，不要输出正文内容。
 
 【背景说明开始】
@@ -550,11 +671,12 @@ class IntegratedResearchReportGenerator:
 5. 不要输出\"建议补充\"、\"需要添加\"等提示性语言
 6. 不要编造图片地址或数据
 7. 内容要详实、专业，可直接使用
+8. 本报告的目标公司是 {self.target_company}（{self.target_company_code}）；
+   同行公司数据只能用于对比，不得写成目标公司的经营或财务事实
 
 **数据来源标注：**
-- 财务数据标注：（数据来源：东方财富-港股-财务报表[1]）
-- 主营业务信息标注：（数据来源：同花顺-主营介绍[2]）
-- 股东结构信息标注：（数据来源：同花顺-股东信息网页爬虫[3]）
+- 只引用【财务研报汇总内容】中确实提供的网址、数据来源和事实，不得沿用其他公司的链接。
+- 没有可核对来源的数字或观点，写明资料不足，不要编造引用文献。
 
 【本次任务】
 {part_title}
@@ -572,10 +694,8 @@ class IntegratedResearchReportGenerator:
 """
         if is_last:
             section_prompt += """
-请在本节最后以"引用文献"格式，列出所有正文中用到的参考资料，格式如下：
-[1] 东方财富-港股-财务报表: https://emweb.securities.eastmoney.com/PC_HKF10/FinancialAnalysis/index
-[2] 同花顺-主营介绍: https://basic.10jqka.com.cn/new/000066/operate.html
-[3] 同花顺-股东信息: https://basic.10jqka.com.cn/HK0020/holder.html
+请在本节最后以"引用文献"格式，列出正文实际引用且在【财务研报汇总内容】中出现的资料及其真实链接。
+如果汇总内容没有提供可核对的链接，不要编造网址或编号。
 """
         section_text = llm.call(
             section_prompt,
@@ -595,7 +715,7 @@ class IntegratedResearchReportGenerator:
         """格式化markdown文件"""
         try:
             import subprocess
-            format_cmd = ["mdformat", output_file]
+            format_cmd = [sys.executable, "-m", "mdformat", output_file]
             subprocess.run(format_cmd, check=True, capture_output=True, text=True, encoding='utf-8')
             print(f"✅ 已用 mdformat 格式化 Markdown 文件: {output_file}")
         except Exception as e:
@@ -704,10 +824,13 @@ class IntegratedResearchReportGenerator:
                     print(f"[警告] 本地图片不存在: {abs_img_path}")
                     img_exists = False
                 else:
-                    self.copy_image(abs_img_path, new_img_path)
+                    img_exists = self.copy_image(abs_img_path, new_img_path)
             # 记录替换
             if img_exists:
-                replace_map[img_path] = f'./images/{new_filename}'
+                relative_image = os.path.relpath(
+                    new_img_path, os.path.dirname(new_md_path) or "."
+                ).replace(os.sep, "/")
+                replace_map[img_path] = f"./{relative_image}"
             else:
                 not_exist_set.add(img_path)
 
@@ -731,19 +854,46 @@ def main():
     # 添加命令行参数支持
     parser = argparse.ArgumentParser(description='整合的金融研报生成器')
     parser.add_argument('--search-engine', choices=['ddg', 'sogou'], default='sogou',
-                       help='搜索引擎选择: ddg (DuckDuckGo) 或 sogou (搜狗), 默认: ddg')
-    parser.add_argument('--company', default='商汤科技', help='目标公司名称')
+                       help='搜索引擎选择: ddg (DuckDuckGo) 或 sogou (搜狗), 默认: sogou')
+    parser.add_argument('--company', default=None, help='目标公司名称；A 股可按代码自动识别')
     parser.add_argument('--code', default='00020', help='股票代码')
-    parser.add_argument('--market', default='HK', help='市场代码')
+    parser.add_argument('--market', choices=['A', 'HK'], default=None, help='市场代码；默认按代码识别')
+    parser.add_argument('--no-sell-side-review', action='store_true', help='关闭卖方研报对照')
+    parser.add_argument('--sell-side-days', type=int, default=90, help='检索最近多少天的卖方研报')
+    parser.add_argument('--sell-side-max-reports', type=int, default=3, help='最多对照几家券商')
+    parser.add_argument('--as-of', type=date.fromisoformat, default=None, help='研报检索截止日 YYYY-MM-DD')
     
     args = parser.parse_args()
     
     # 创建生成器实例
+    a_share_code = re.fullmatch(
+        r"(?:SH|SZ|BJ)?\d{6}(?:\.(?:SH|SZ|SS|BJ))?", args.code.upper()
+    )
+    market = args.market or ("A" if a_share_code else "HK")
+    try:
+        code = (
+            normalize_a_share_code(args.code)
+            if market == "A" else normalize_hk_code(args.code)
+        )
+        if args.company:
+            company = args.company
+        elif market == "A":
+            company = lookup_a_share_company(code)
+        elif code == "00020":
+            company = "商汤科技"
+        else:
+            company = lookup_hk_company(code)
+    except ValueError as exc:
+        parser.error(str(exc))
     generator = IntegratedResearchReportGenerator(
-        target_company=args.company,
-        target_company_code=args.code, 
-        target_company_market=args.market,
-        search_engine=args.search_engine
+        target_company=company,
+        target_company_code=code,
+        target_company_market=market,
+        search_engine=args.search_engine,
+        enable_sell_side_review=not args.no_sell_side_review,
+        sell_side_days=args.sell_side_days,
+        sell_side_max_reports=args.sell_side_max_reports,
+        sell_side_as_of=args.as_of,
     )
     
     # 运行完整流程

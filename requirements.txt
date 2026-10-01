@@ -26,6 +26,7 @@ k-sogou-search
 beautifulsoup4>=4.9.0
 lxml>=4.6.0
 duckduckgo-search>=3.0.0
+pypdf>=5.0.0
 
 # ========== 金融数据接口 ==========
 akshare>=1.12.0

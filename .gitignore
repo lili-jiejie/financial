@@ -3,6 +3,8 @@ run_report.py
 __pycache__/*.pyc
 *.pyo
 outputs/inputs/
+outputs/runs/
+outputs/full_pipeline_*.log
 .venv/
 .venv_clean/
 **/__pycache__/

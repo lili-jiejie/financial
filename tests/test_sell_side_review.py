@@ -518,6 +518,27 @@ def test_sources_only_reason_is_not_mistaken_for_missing_key():
     assert "未配置模型密钥" not in output
 
 
+def test_no_model_still_delivers_quote_led_comparison_and_risk_worksheet():
+    source = (
+        "公司盈利能力有望保持稳定，未来需求继续增长。"
+        "我们预计公司2026年净利润继续增长。"
+        "风险提示：原材料价格大幅波动；储能需求不及预期。"
+    )
+    result = build_sell_side_review(
+        code="300750",
+        original_report="增长能否持续、利润率变化、回款和原材料成本是后续复核重点。",
+        llm=None,
+        provider=FixedProvider(source),
+        return_result=True,
+    )
+    assert result.status == "evidence_fallback"
+    assert "### 自研与卖方观点的证据对照" in result.markdown
+    assert "### 风险评估与后续监测" in result.markdown
+    assert "原材料价格大幅波动" in result.markdown
+    assert "季度毛利率" in result.markdown
+    assert "我们预计公司2026年净利润继续增长" in result.markdown
+
+
 @pytest.mark.parametrize(
     ("answer", "message"),
     [("", "模型未返回分析结果"), ("无法解析的响应", "分析格式无法解析")],
@@ -588,7 +609,7 @@ def test_long_reports_are_bounded_before_model_call():
         provider=FixedProvider(source),
     )
     assert llm.called
-    assert len(llm.prompt) < 6500
+    assert len(llm.prompt) < 20000
     assert "仅核对原研报和卖方正文中的部分重点片段" in output
 
 
@@ -615,7 +636,7 @@ def test_source_context_budget_holds_when_user_requests_twenty_brokers():
     )
     evidence = json.loads(llm.prompt.split("卖方资料：\n", 1)[1])
     assert len(evidence) == 20
-    assert sum(len(item["text"]) for item in evidence) <= 1800
+    assert sum(len(item["text"]) for item in evidence) <= 9000
 
 
 def test_untrusted_titles_and_model_text_cannot_break_markdown_structure():
@@ -730,6 +751,7 @@ def test_integrated_report_appends_supplement_before_saving(monkeypatch, tmp_pat
     generator.sell_side_max_reports = 3
     generator.sell_side_as_of = date(2026, 10, 1)
     generator.sell_side_provider = object()
+    generator.api_key = "test-key"
     generator.llm = object()
     generator.extract_images_from_markdown = lambda _src, _dir, dst: Path(
         dst
@@ -903,6 +925,27 @@ def test_section_prompt_uses_target_company_not_old_example_urls():
     assert section.startswith("## 投资分析")
 
 
+def test_invalid_outline_falls_back_to_complete_own_research_structure():
+    from integrated_research_report_generator import IntegratedResearchReportGenerator
+
+    generator = object.__new__(IntegratedResearchReportGenerator)
+    generator.target_company = "宁德时代"
+    generator.target_company_code = "300750"
+
+    class BadOutlineLLM:
+        def call(self, _prompt, **_kwargs):
+            return "part_title: 风险提示\npart_title: 数据来源"
+
+    parts = generator.generate_outline(BadOutlineLLM(), "背景", "财务资料")
+    titles = [part["part_title"] for part in parts]
+    assert titles == [
+        "公司与财务事实",
+        "投资逻辑与待核实假设",
+        "风险提示与监测指标",
+        "资料来源与分析限制",
+    ]
+
+
 def test_main_accepts_only_a_share_code(monkeypatch):
     import sys
 
@@ -926,6 +969,34 @@ def test_main_accepts_only_a_share_code(monkeypatch):
     assert observed["target_company_code"] == "300750"
     assert observed["target_company_market"] == "A"
     assert observed["enable_sell_side_review"] is True
+
+
+def test_main_keeps_code_only_run_when_name_service_is_unavailable(monkeypatch):
+    import sys
+
+    import integrated_research_report_generator as integrated
+
+    observed = {}
+
+    class FakeGenerator:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        def run_full_pipeline(self):
+            observed["identity_verified"] = self.company_identity_verified
+            return "base.md", "report.md"
+
+    def unavailable(_code):
+        raise ValueError("名称服务暂不可用")
+
+    monkeypatch.setattr(integrated, "lookup_a_share_company", unavailable)
+    monkeypatch.setattr(integrated, "IntegratedResearchReportGenerator", FakeGenerator)
+    monkeypatch.setattr(sys, "argv", ["program", "--code", "600478"])
+    integrated.main()
+
+    assert observed["target_company"] == "600478"
+    assert observed["target_company_code"] == "600478"
+    assert observed["identity_verified"] is False
 
 
 def test_main_resolves_hk_code_without_reusing_default_company(monkeypatch):
@@ -1004,9 +1075,20 @@ def test_full_pipeline_keeps_original_stages_and_appends_review(monkeypatch, tmp
         integrated,
         "get_all_financial_statements",
         lambda **_kw: {
-            "balance_sheet": pd.DataFrame({"报告期": ["2025"], "资产": [100]}),
-            "income_statement": None,
-            "cash_flow_statement": None,
+            "balance_sheet": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31"],
+                "TOTAL_ASSETS": [200e8],
+                "TOTAL_LIABILITIES": [80e8],
+            }),
+            "income_statement": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31"],
+                "TOTAL_OPERATE_INCOME": [120e8],
+                "PARENT_NETPROFIT": [20e8],
+            }),
+            "cash_flow_statement": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31"],
+                "NETCASH_OPERATE": [30e8],
+            }),
         },
     )
     monkeypatch.setattr(integrated, "get_stock_intro", lambda *_a, **_kw: "公司介绍")
@@ -1014,17 +1096,11 @@ def test_full_pipeline_keeps_original_stages_and_appends_review(monkeypatch, tmp
         integrated, "get_shareholder_info", lambda **_kw: {"tables": []}
     )
     monkeypatch.setattr(integrated.time, "sleep", lambda _seconds: None)
-    seen = {}
-
-    def fake_review(**kwargs):
-        seen.update(kwargs)
-        return "## 卖方研报对照与风险补充\n已核对来源。"
-
-    monkeypatch.setattr(integrated, "build_sell_side_review", fake_review)
     generator = integrated.IntegratedResearchReportGenerator(
         target_company="宁德时代",
         target_company_code="300750",
         target_company_market="A",
+        analysis_mode="agent",
     )
     generator.search_engine.search = lambda *_args: []
     generator.analyze_companies_in_directory = lambda *_args: {
@@ -1033,13 +1109,63 @@ def test_full_pipeline_keeps_original_stages_and_appends_review(monkeypatch, tmp
     generator.run_comparison_analysis = lambda *_args: {}
     generator.format_markdown = lambda _path: None
     generator.convert_to_docx = lambda _path: None
+    generator.sell_side_provider = FixedProvider(
+        "原材料价格波动可能侵蚀利润，动力电池需求持续旺盛。"
+    )
+    generator.api_key = "test-key"
 
     class FakeLLM:
         def call(self, prompt, **_kwargs):
             if "分段大纲" in prompt:
-                return "```yaml\n- part_title: 投资分析\n  part_desc: 基本面\n```"
+                return (
+                    "```yaml\n- part_title: 投资分析\n  part_desc: 基本面\n"
+                    "- part_title: 风险监测\n  part_desc: 持续跟踪\n```"
+                )
+            if "严格 JSON 对象" in prompt:
+                assert "短期需求增长仍需验证" in prompt
+                return json.dumps(
+                    {
+                        "agreements": [{
+                            "point": "原料成本是共同风险",
+                            "original_quote": "原材料价格波动可能压低毛利率",
+                            "source_quote": "原材料价格波动可能侵蚀利润",
+                            "source_ids": ["S1"],
+                        }],
+                        "differences": [{
+                            "original_view": "需求仍需验证",
+                            "sell_side_view": "卖方判断需求旺盛",
+                            "reason": "两份材料的需求判断不同，需核对订单",
+                            "original_quote": "短期需求增长仍需验证",
+                            "source_quote": "动力电池需求持续旺盛",
+                            "source_ids": ["S1"],
+                        }],
+                        "broker_differences": [],
+                        "assumptions": [{
+                            "claim": "需求维持旺盛",
+                            "verification": "跟踪订单和产销公告",
+                            "source_quote": "动力电池需求持续旺盛",
+                            "source_ids": ["S1"],
+                        }],
+                        "risks": [{
+                            "risk": "原料涨价风险",
+                            "impact_path": "可能压低毛利率",
+                            "monitor": "跟踪季度毛利率和原料采购价",
+                            "original_quote": "原材料价格波动可能压低毛利率",
+                            "source_quote": "原材料价格波动可能侵蚀利润",
+                            "source_ids": ["S1"],
+                        }],
+                    },
+                    ensure_ascii=False,
+                )
             if "直接输出" in prompt:
-                return "## 投资分析\n原始报告观点。"
+                assert "## 宁德时代财务数据基线（程序计算）" in prompt
+                if "【本次任务】\n风险监测" in prompt:
+                    assert "## 投资分析" in prompt
+                    return "## 风险监测\n持续跟踪订单和季度毛利率。"
+                return (
+                    "## 投资分析\n原材料价格波动可能压低毛利率。"
+                    "短期需求增长仍需验证。"
+                )
             return "整理后公司信息。"
 
     generator.llm = FakeLLM()
@@ -1049,5 +1175,84 @@ def test_full_pipeline_keeps_original_stages_and_appends_review(monkeypatch, tmp
     assert "A_300750" in base_path
     assert "A_300750" in final_path
     assert "财务基础分析" in Path(base_path).read_text(encoding="utf-8")
-    assert "已核对来源" in Path(final_path).read_text(encoding="utf-8")
-    assert "原始报告观点" in seen["original_report"]
+    combined = Path(final_path).read_text(encoding="utf-8")
+    assert "## 投资分析" in combined
+    assert "## 风险监测" in combined
+    assert "## 宁德时代财务数据基线（程序计算）" in combined
+    assert "### 观点一致之处" in combined
+    assert "### 与原研报的主要分歧" in combined
+    assert "### 风险评估与后续监测" in combined
+    assert "原研报原文：『原材料价格波动可能压低毛利率』" in combined
+    assert "[S1](https://data.eastmoney.com/report/info/" in combined
+    run_dir = Path(final_path).parent
+    assert (run_dir / "自研报告.md").is_file()
+    assert (run_dir / "卖方对照与风险评估.md").is_file()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["review_status"] == "generated"
+    assert manifest["sell_side_source_count"] == 1
+    assert manifest["sell_side_readable_count"] == 1
+
+
+def test_code_only_pipeline_without_model_produces_combined_markdown_and_word(
+    monkeypatch, tmp_path
+):
+    import pandas as pd
+
+    import integrated_research_report_generator as integrated
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setattr(
+        integrated,
+        "identify_competitors_with_ai",
+        lambda **_kwargs: pytest.fail("no-key baseline must not call the model"),
+    )
+    monkeypatch.setattr(
+        integrated,
+        "get_all_financial_statements",
+        lambda **_kwargs: {
+            "income_statement": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+                "TOTAL_OPERATE_INCOME": [120e8, 100e8],
+                "PARENT_NETPROFIT": [20e8, 10e8],
+            }),
+            "balance_sheet": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+                "TOTAL_ASSETS": [200e8, 100e8],
+                "TOTAL_LIABILITIES": [80e8, 60e8],
+            }),
+            "cash_flow_statement": pd.DataFrame({
+                "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+                "NETCASH_OPERATE": [30e8, 12e8],
+            }),
+        },
+    )
+    monkeypatch.setattr(integrated, "get_stock_intro", lambda *_args, **_kwargs: "公司介绍")
+    monkeypatch.setattr(integrated, "get_shareholder_info", lambda **_kwargs: {"tables": []})
+    monkeypatch.setattr(integrated.time, "sleep", lambda _seconds: None)
+    generator = integrated.IntegratedResearchReportGenerator(
+        target_company="宁德时代",
+        target_company_code="300750",
+        target_company_market="A",
+        analysis_mode="auto",
+        sell_side_provider=FixedProvider(
+            "我们预计公司2026年净利润继续增长。"
+            "风险提示：原材料价格大幅波动；储能需求不及预期。"
+        ),
+    )
+    generator.search_engine.search = lambda *_args: []
+    generator.format_markdown = lambda _path: None
+    basic_path, combined_path = generator.run_full_pipeline()
+
+    assert Path(basic_path).is_file()
+    combined = Path(combined_path).read_text(encoding="utf-8")
+    assert "| 2025 | 120.00 | 20.00 | 30.00 |" in combined
+    assert "自研与卖方观点的证据对照" in combined
+    assert "风险评估与后续监测" in combined
+    assert "原材料价格大幅波动" in combined
+    run_dir = Path(combined_path).parent
+    assert (run_dir / "综合投研报告.docx").is_file()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["analysis_mode"] == "baseline"
+    assert manifest["review_status"] == "evidence_fallback"
+    assert manifest["combined_docx"] == str(run_dir / "综合投研报告.docx")

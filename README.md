@@ -123,7 +123,8 @@ financial_research_report/
 │       └── all_search_results.json        # 搜索结果汇总
 ├── 📁 输出结果
 │   └── outputs/                            # 生成的报告和图表
-│       ├── inputs/[市场]_[代码]_[运行时间]/   # 本次运行的数据输入
+│       ├── runs/[市场]_[代码]_[运行时间]/  # 每次完整运行及其 inputs/
+│       ├── sell_side_complete_demo_300750.md # 完整合并示例
 │       ├── sell_side_demo_300750.md       # 无模型密钥的公开来源示例
 │       ├── sell_side_no_coverage_demo_600478.md # 无公开覆盖示例
 │       └── session_[ID]/                   # 按会话分组的输出
@@ -177,7 +178,7 @@ python -X utf8 -m pip install -r requirements.txt
 ```
 
 `-X utf8` 可避免 Windows 默认 GBK 环境读取含中文注释的依赖文件时解码失败。
-如需 Word 输出，还需在系统中安装 Pandoc；未安装时仍会保留 Markdown 报告。
+Word 输出优先使用 Pandoc；未安装 Pandoc 时会使用内置转换器。
 
 2. **环境配置**
 创建 `.env` 文件并配置以下变量：
@@ -201,8 +202,11 @@ python integrated_research_report_generator.py --code 300750 --no-sell-side-revi
 ```python
 from integrated_research_report_generator import IntegratedResearchReportGenerator
 
-# 创建生成器实例
-generator = IntegratedResearchReportGenerator()
+# 只输入 A 股代码时，也可按以下方式调用；默认 auto 会在无密钥时使用财务基线
+generator = IntegratedResearchReportGenerator(
+    target_company="宁德时代", target_company_code="300750",
+    target_company_market="A",
+)
 
 # 运行完整流程
 generator.run_full_pipeline()
@@ -210,24 +214,33 @@ generator.run_full_pipeline()
 
 ### A 股卖方研报自动对照与风险补充
 
-在原有整合式生成器的最后一步追加一节：按股票代码检索最近的公开个股研报，尽量读取可公开访问的 PDF 或网页正文，再对照刚生成的研报，列出有原文依据的观点与风险线索。无需手动上传卖方 PDF。支持沪深 A 股与北交所 `92` 号段代码的自动识别；未取得公开卖方正文时仍会明确标注覆盖不足。
+同一个入口完成财务数据采集、自研分析、公开卖方研报检索、观点对照、风险评估和最终合并。无需手动上传卖方 PDF。支持沪深 A 股与北交所 `92` 号段代码的自动识别；未取得公开卖方正文时会明确标注覆盖不足。
 
 ```bash
-# 完整流程：只输入 A 股代码，自动识别公司名称并生成研报与补充章节
+# 完整流程：只输入 A 股代码，无模型密钥时自动采用可复算财务基线
 python integrated_research_report_generator.py --code 300750
+
+# 使用原有交互式研报代理和模型生成自研报告（需要 .env 中的模型配置）
+python integrated_research_report_generator.py --code 300750 --analysis-mode agent
 
 # 只运行新模块，检查公开研报来源；已有自生成研报时可传 --report 做对照
 python -m utils.sell_side_review 300750 --as-of 2026-10-01 --days 90 --max-reports 3 --sources-only
 python -m utils.sell_side_review 300750 --report 自己生成的研报.md
 ```
 
-完整流程需要 `.env` 中配置可用的 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`。独立模块未配置模型或指定 `--sources-only` 时只列来源，不编造观点或风险判断；`--sources-only` 仍会检查公开正文是否可读，但即使已配置密钥也不会调用模型。默认对照最近 90 天内最多三家不同券商；`--as-of` 可固定检索截止日，完整流程还支持 `--sell-side-days`、`--sell-side-max-reports` 和 `--no-sell-side-review`。`--as-of` 只是日期过滤，不是历史时点的数据快照，不能直接用于无前瞻信息的回测。
+默认的 `--analysis-mode auto` 在已配置模型密钥时沿用原项目的交互式财务分析代理，未配置时使用本次财务 CSV 计算年度指标并形成保守的自研基线。`--analysis-mode baseline` 可显式采用后者，适合不稳定的小型本地模型。模型配置沿用 `.env` 中的 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`；可选的 `OPENAI_REASONING_EFFORT` 会透传给支持该参数的兼容接口。原交互式代理返回无效报告时，财务分析会回退到程序计算基线。无密钥运行不会调用原交互式代理或模型；风险清单根据公开原文和固定核查规则生成，并明确标注为规则化对照。`--sources-only` 只列来源，不生成对照或风险清单。
 
-[宁德时代公开研报来源示例](outputs/sell_side_demo_300750.md)和[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)展示了两种真实结果。港股代码也可自动识别公司名称，但卖方正文自动检索目前仅接入 A 股；港股报告会明确显示未覆盖提示。
+每次完整运行保存在 `outputs/runs/<运行编号>/`：`基础资料与分析.md`、`自研报告.md`、`卖方对照与风险评估.md`、**`综合投研报告.md`**、`综合投研报告.docx`、`manifest.json` 和本次 CSV 输入。综合报告先给自研分析，再给卖方原文对照及风险评估；`manifest.json` 记录分析方式、来源篇数、可读篇数和对照状态。若系统安装了 Pandoc，Word 使用 Pandoc 转换；否则使用内置转换保留正文、表格与来源网址。
+
+[宁德时代完整合并示例](outputs/sell_side_complete_demo_300750.md)展示无密钥、真实公开来源的完整产物，包括自研财务分析、三家券商预测原文、观点核查与风险监测表。[来源清单示例](outputs/sell_side_demo_300750.md)仅用于检查检索能力；[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)说明资料不足时的表现。
+
+默认对照最近 90 天内最多三家不同券商；`--as-of` 可固定检索截止日，完整流程还支持 `--sell-side-days`、`--sell-side-max-reports`、`--max-competitors`、`--analysis-rounds` 和 `--no-sell-side-review`。`--as-of` 只是日期过滤，不是历史时点的数据快照，不能直接用于无前瞻信息的回测。
+
+港股代码也可自动识别公司名称，但卖方正文自动检索目前仅接入 A 股；港股报告会明确显示未覆盖提示。
 
 默认数据源是东方财富公开研报聚合索引，并非各券商的登录研究平台。输出明确标注“仅标题与元数据”“公开网页节选”或“PDF 文字节选”；表内日期是索引日期，可能与 PDF 封面日期不同。网页/PDF 节选不等于完整报告，PDF 提取还可能错读表格和数字，公开索引也不保证覆盖所有券商及付费研报。公开 PDF 若返回验证页面或无法提取文字，会回退到网页节选；两者都不可读时仅列来源，不进行内容比较。程序不绕过登录、付费墙或反爬验证。公开可读不等于可批量采集、再分发或传给外部模型，正式部署前需要核对来源条款与团队的数据处理权限；取得授权数据后，可实现 `utils/sell_side_review.py` 的 `SellSideProvider` 接口并通过生成器的 `sell_side_provider` 参数接入。
 
-风险补充按“风险点—可能的影响路径—后续监测项”组织；卖方乐观假设核查点和券商之间的差异线索都要求保留实际来源与可在取得的正文中找到的原文引句。与原研报的一致或分歧还要求能找到原研报原句。公开资料不足时不会把“预测偏乐观”直接判成“卖方夸大”，也不会编造风险概率或等级。最终结论仍需研究员结合公司公告、财报和预测时点复核。
+风险补充按“风险点—可能的影响路径—后续监测项”组织；模型模式的卖方乐观假设核查点和券商差异线索都要求保留实际来源和可在取得的正文中找到的原文引句。与自研报告的一致或分歧还要求能找到自研原句；模型输出无法通过引文验证时回退到规则化的原文对照，不展示无法核对的模型判断。公开资料不足时不会把“预测偏乐观”直接判成“卖方夸大”，也不会编造风险概率或等级。最终结论仍需研究员结合公司公告、财报和预测时点复核。
 
 新功能的离线回归检查可运行 `python -m pytest -q`（需另装 `pytest`）。
 

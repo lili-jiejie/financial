@@ -21,6 +21,7 @@ class LLMConfig:
     api_key: str = os.environ.get("OPENAI_API_KEY", "")
     base_url: str = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model: str = os.environ.get("OPENAI_MODEL", "gpt-4-turbo-preview")
+    reasoning_effort: Optional[str] = None
     temperature: float = 0.1
     max_tokens: int = 16384
 

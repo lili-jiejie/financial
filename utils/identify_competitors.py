@@ -1,5 +1,4 @@
-from http import client
-import json
+import os
 import yaml
 from typing import Dict, List
 
@@ -61,7 +60,11 @@ def identify_competitors_with_ai(api_key,
             {"role": "system", "content": "你是一个专业的金融分析师，擅长识别公司的竞争对手。请严格按照YAML格式返回结果。"},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.3
+        temperature=0.3,
+        **(
+            {"reasoning_effort": os.environ["OPENAI_REASONING_EFFORT"]}
+            if os.getenv("OPENAI_REASONING_EFFORT") else {}
+        ),
     )
     
     competitors_text = response.choices[0].message.content.strip()

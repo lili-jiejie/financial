@@ -30,7 +30,10 @@ from utils.get_stock_intro import (
     normalize_hk_code,
 )
 from utils.search_engine import SearchEngine
+from utils.financial_baseline import financial_baseline_report
+from utils.markdown_docx import markdown_to_docx
 from utils.sell_side_review import (
+    SellSideReviewResult,
     build_sell_side_review,
     lookup_a_share_company,
     normalize_a_share_code,
@@ -94,6 +97,9 @@ class IntegratedResearchReportGenerator:
         sell_side_max_reports=3,
         sell_side_as_of=None,
         sell_side_provider=None,
+        max_competitors=3,
+        analysis_mode="auto",
+        analysis_rounds=20,
     ):
         # 环境变量与全局配置
         load_dotenv()
@@ -103,6 +109,7 @@ class IntegratedResearchReportGenerator:
         # 打印模型
         print(f"🔧 使用的模型: {self.model}")
         self.target_company = str(target_company).strip()
+        self.company_identity_verified = True
         if not self.target_company or any(
             ord(char) < 32 or char in '\\/:*?"<>|'
             for char in self.target_company
@@ -119,12 +126,24 @@ class IntegratedResearchReportGenerator:
             raise ValueError("sell_side_days 必须在 1 至 365 之间")
         if not 1 <= sell_side_max_reports <= 20:
             raise ValueError("sell_side_max_reports 必须在 1 至 20 之间")
+        if not 0 <= max_competitors <= 5:
+            raise ValueError("max_competitors 必须在 0 至 5 之间")
+        if analysis_mode not in ("auto", "agent", "baseline"):
+            raise ValueError("analysis_mode 必须为 auto、agent 或 baseline")
+        if not 1 <= analysis_rounds <= 30:
+            raise ValueError("analysis_rounds 必须在 1 至 30 之间")
         self.enable_sell_side_review = enable_sell_side_review
         self.sell_side_days = sell_side_days
         self.sell_side_max_reports = sell_side_max_reports
         self.sell_side_as_of = sell_side_as_of
         self.sell_side_provider = sell_side_provider
-        
+        self.max_competitors = max_competitors
+        self.analysis_mode = (
+            ("agent" if self.api_key else "baseline")
+            if analysis_mode == "auto" else analysis_mode
+        )
+        self.analysis_rounds = analysis_rounds
+
         # 搜索引擎配置
         self.search_engine = SearchEngine(search_engine)
         print(f"🔍 搜索引擎已配置为: {search_engine.upper()}")
@@ -136,7 +155,8 @@ class IntegratedResearchReportGenerator:
             f"{datetime.now():%Y%m%d_%H%M%S_%f}"
         )
         self.run_id = run_id
-        self.run_dir = os.path.join("outputs", "inputs", run_id)
+        self.output_dir = os.path.join("outputs", "runs", run_id)
+        self.run_dir = os.path.join(self.output_dir, "inputs")
         self.data_dir = os.path.join(self.run_dir, "financials")
         self.company_info_dir = os.path.join(self.run_dir, "company_info")
         self.industry_info_dir = os.path.join(self.run_dir, "industry_info")
@@ -150,6 +170,7 @@ class IntegratedResearchReportGenerator:
             api_key=self.api_key,
             base_url=self.base_url,
             model=self.model,
+            reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT") or None,
             temperature=0.7,
             max_tokens=16384,
         )
@@ -166,11 +187,14 @@ class IntegratedResearchReportGenerator:
         
         # 1. 获取竞争对手列表
         print("🔍 识别竞争对手...")
-        other_companies = identify_competitors_with_ai(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            model_name=self.model,
-            company_name=self.target_company
+        other_companies = (
+            identify_competitors_with_ai(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model_name=self.model,
+                company_name=self.target_company,
+            )
+            if self.max_competitors and self.api_key and self.analysis_mode == "agent" else []
         )
         listed_companies = normalize_listed_competitors(other_companies)
         target_code = (
@@ -185,6 +209,7 @@ class IntegratedResearchReportGenerator:
                 == target_code
             )
         ]
+        listed_companies = listed_companies[:self.max_competitors]
         
         # 2. 获取目标公司财务数据
         print(f"\n📊 获取目标公司 {self.target_company} 的财务数据...")
@@ -310,12 +335,13 @@ class IntegratedResearchReportGenerator:
         
         # 整理公司信息
         company_infos = self.get_company_infos(self.company_info_dir)
-        company_infos = self.llm.call(
-            f"请整理以下公司信息内容，确保格式清晰易读，并保留关键信息：\n{company_infos}",
-            system_prompt="你是一个专业的公司信息整理师。",
-            max_tokens=16384,
-            temperature=0.5
-        )
+        if self.api_key and self.analysis_mode == "agent":
+            company_infos = self.llm.call(
+                f"请整理以下公司信息内容，确保格式清晰易读，并保留关键信息：\n{company_infos}",
+                system_prompt="你是一个专业的公司信息整理师。",
+                max_tokens=16384,
+                temperature=0.5
+            )
         
         # 整理股权信息
         try:
@@ -329,7 +355,7 @@ class IntegratedResearchReportGenerator:
         except (requests.RequestException, ValueError) as exc:
             print(f"股东信息获取失败：{exc}")
             tables = []
-        if tables:
+        if tables and self.api_key and self.analysis_mode == "agent":
             table_content = get_table_content(tables)
             shareholder_analysis = self.llm.call(
                 "请分析以下股东信息表格内容：\n" + table_content,
@@ -337,6 +363,8 @@ class IntegratedResearchReportGenerator:
                 max_tokens=16384,
                 temperature=0.5
             )
+        elif tables:
+            shareholder_analysis = get_table_content(tables)
         else:
             shareholder_analysis = "未取得该公司的可用股东结构表格。"
         
@@ -344,9 +372,9 @@ class IntegratedResearchReportGenerator:
         with open(search_results_file, 'r', encoding='utf-8') as f:
             all_search_results = json.load(f)
         search_res = ""
-        for company, results in all_search_results.items():
+        for company, search_hits in all_search_results.items():
             search_res += f"【{company}搜索信息开始】\n"
-            for result in results:
+            for result in search_hits:
                 search_res += f"标题: {result.get('title', '无标题')}\n"
                 search_res += f"链接: {result.get('href', '无链接')}\n"
                 search_res += f"摘要: {result.get('body', '无摘要')}\n"
@@ -357,7 +385,7 @@ class IntegratedResearchReportGenerator:
         formatted_report = self.format_final_reports(merged_results)
         
         # 统一保存为markdown
-        md_output_file = f"财务研报汇总_{self.run_id}.md"
+        md_output_file = os.path.join(self.output_dir, "基础资料与分析.md")
         with open(md_output_file, 'w', encoding='utf-8') as f:
             f.write(f"# 公司基础信息\n\n## 整理后公司信息\n\n{company_infos}\n\n")
             f.write(f"# 股权信息分析\n\n{shareholder_analysis}\n\n")
@@ -371,6 +399,10 @@ class IntegratedResearchReportGenerator:
         # 存储结果供第二阶段使用
         self.analysis_results = {
             'md_file': md_output_file,
+            'target_baseline': (
+                results.get(self.target_company, {}).get('final_report', '')
+                if self.analysis_mode == 'baseline' else ''
+            ),
             'company_infos': company_infos,
             'shareholder_analysis': shareholder_analysis,
             'search_res': search_res,
@@ -389,79 +421,186 @@ class IntegratedResearchReportGenerator:
         # 处理图片路径
         print("🖼️ 处理图片路径...")
         new_md_path = md_file_path.replace('.md', '_images.md')
-        images_dir = os.path.join(os.path.dirname(md_file_path), 'images', self.run_id)
+        report_dir = getattr(self, "output_dir", os.path.dirname(md_file_path) or ".")
+        os.makedirs(report_dir, exist_ok=True)
+        images_dir = os.path.join(report_dir, 'images')
         self.extract_images_from_markdown(md_file_path, images_dir, new_md_path)
         
         # 加载报告内容
         report_content = self.load_report_content(new_md_path)
         background = self.get_background()
         
-        # 生成大纲
-        print("\n📋 生成报告大纲...")
-        parts = self.generate_outline(self.llm, background, report_content)
-        
-        # 分段生成深度研报
-        print("\n✍️ 开始分段生成深度研报...")
-        full_report = [f'# {self.target_company}研究报告\n']
-        prev_content = ''
-        
-        for idx, part in enumerate(parts):
-            part_title = part.get('part_title', f'部分{idx+1}')
-            print(f"\n  正在生成：{part_title}")
-            is_last = (idx == len(parts) - 1)
-            section_text = self.generate_section(
-                self.llm, part_title, prev_content, background, report_content, is_last
+        if getattr(self, "analysis_mode", "agent") == "baseline":
+            baseline = self.analysis_results.get("target_baseline", "")
+            if "财务数据基线（程序计算）" not in baseline:
+                raise ValueError("程序计算的自研财务基线缺失，已停止生成合并报告")
+            full_report = [
+                f"# {self.target_company}研究报告\n",
+                "## 独立财务分析\n\n" + baseline,
+                "## 初步结论与风险核查路径\n\n"
+                "本系统先核对营业收入、归母净利润、经营现金流与资产负债率的年度变化。"
+                "增长能否持续、利润率变化、回款和原材料成本是后续复核重点。"
+                "仅凭这些年度数据无法计算可靠的目标价或给出买卖评级；"
+                "新增的卖方观点会在下一部分逐条核对。",
+            ]
+        else:
+            # Preserve the original interactive report-generation agent.
+            print("\n📋 生成报告大纲...")
+            parts = self.generate_outline(self.llm, background, report_content)
+            print("\n✍️ 开始分段生成深度研报...")
+            full_report = [f'# {self.target_company}研究报告\n']
+            # Keep the program-calculated figures alongside the model's
+            # narrative so the published report has an auditable numeric base.
+            company_files = self.get_company_files(
+                getattr(self, "data_dir", report_dir)
+            ).get(
+                self.target_company, []
             )
-            full_report.append(section_text)
-            print(f"  ✅ 已完成：{part_title}")
-            prev_content = '\n'.join(full_report)
-        
-        # 保存最终报告
-        final_report = '\n\n'.join(full_report)
-        output_file = f"深度财务研报分析_{self.run_id}.md"
-        with open(output_file, "w", encoding="utf-8") as output:
-            output.write(final_report)
+            if company_files:
+                try:
+                    full_report.append(
+                        financial_baseline_report(self.target_company, company_files)
+                    )
+                except ValueError:
+                    # The existing interactive agent also accepts providers
+                    # whose CSV schema is not covered by the A-share baseline.
+                    pass
+            prev_content = '\n\n'.join(full_report)
+            if not isinstance(parts, list) or not parts or any(
+                not isinstance(part, dict) or not str(part.get('part_title') or '').strip()
+                for part in parts
+            ):
+                raise ValueError("自研报告大纲为空或格式错误；已停止生成，避免交付只有卖方资料的空报告")
+            for idx, part in enumerate(parts):
+                part_title = part.get('part_title', f'部分{idx+1}')
+                print(f"\n  正在生成：{part_title}")
+                is_last = (idx == len(parts) - 1)
+                section_text = self.generate_section(
+                    self.llm, part_title, prev_content, background, report_content, is_last
+                )
+                if not isinstance(section_text, str) or not section_text.strip():
+                    raise ValueError(f"自研报告章节“{part_title}”生成失败；已停止合并报告")
+                full_report.append(section_text)
+                prev_content = '\n\n'.join(full_report)
+                print(f"  ✅ 已完成：{part_title}")
+
+        # Preserve the independent research report before any sell-side material
+        # is appended, so reviewers can distinguish our analysis from external views.
+        own_report_file = os.path.join(report_dir, "自研报告.md")
+        own_report = '\n\n'.join(full_report)
+        with open(own_report_file, "w", encoding="utf-8") as output:
+            output.write(own_report)
 
         # Format the original report first. Reformatting the appended source
         # table can remove its escaped pipe characters and change citations.
         print("\n🎨 格式化报告...")
-        self.format_markdown(output_file)
-        with open(output_file, "r", encoding="utf-8") as formatted:
-            final_report = formatted.read()
+        self.format_markdown(own_report_file)
+        with open(own_report_file, "r", encoding="utf-8") as formatted:
+            own_report = formatted.read()
+        review_status = "disabled"
+        source_count = 0
+        readable_count = 0
         if self.enable_sell_side_review and self.target_company_market == "A":
             try:
-                supplement = build_sell_side_review(
+                result = build_sell_side_review(
                     code=self.target_company_code,
-                    original_report=final_report,
-                    llm=self.llm,
+                    original_report=own_report,
+                    llm=self.llm if self.api_key else None,
                     provider=self.sell_side_provider,
                     as_of=self.sell_side_as_of,
                     lookback_days=self.sell_side_days,
                     max_reports=self.sell_side_max_reports,
+                    return_result=True,
                 )
-                final_report = f"{final_report}\n\n{supplement}"
+                if isinstance(result, SellSideReviewResult):
+                    supplement = result.markdown
+                    review_status = result.status
+                    source_count = result.source_count
+                    readable_count = result.readable_count
+                else:
+                    supplement = result
+                    review_status = "generated"
             except Exception as exc:
                 print(f"卖方研报对照未完成：{exc}")
-                final_report += (
-                    "\n\n## 卖方研报对照与风险补充\n\n"
+                review_status = "unavailable"
+                supplement = (
+                    "## 卖方研报对照与风险补充\n\n"
                     "公开研报检索暂不可用，本节未生成观点或风险判断。"
                 )
         elif self.enable_sell_side_review:
-            final_report += (
-                "\n\n## 卖方研报对照与风险补充\n\n"
+            review_status = "unsupported_market"
+            supplement = (
+                "## 卖方研报对照与风险补充\n\n"
                 "当前自动检索仅接入 A 股公开个股研报索引；"
                 "本股票暂无可核对的卖方正文，因此未生成观点或风险判断。"
             )
+        else:
+            supplement = (
+                "## 卖方研报对照与风险补充\n\n"
+                "本次运行已关闭卖方研报检索与对照。"
+            )
+        review_file = os.path.join(report_dir, "卖方对照与风险评估.md")
+        self.save_markdown(supplement + "\n", review_file)
+        output_file = os.path.join(report_dir, "综合投研报告.md")
+        overview = (
+            "\n\n> 本报告先呈现本系统独立生成的分析，末尾再列公开卖方研报的"
+            "对照与风险核查。卖方预测和观点不等于已实现的公司事实。\n"
+        )
+        if not getattr(self, "company_identity_verified", True):
+            overview += (
+                "> 公司名称接口暂不可用，本次仅以股票代码标识目标公司；"
+                "使用前应核对代码对应的上市公司。\n"
+            )
+        title_end = own_report.find("\n")
+        if own_report.lstrip().startswith("# ") and title_end >= 0:
+            final_report = own_report[:title_end] + overview + own_report[title_end:]
+        else:
+            final_report = own_report + overview
+        final_report = f"{final_report.rstrip()}\n\n---\n\n{supplement.strip()}\n"
         self.save_markdown(final_report, output_file)
-        
+        self.last_run_artifacts = {
+            "basic_report": md_file_path,
+            "own_report": own_report_file,
+            "sell_side_review": review_file,
+            "combined_report": output_file,
+            "review_status": review_status,
+        }
+        if review_status not in ("disabled", "unsupported_market", "unavailable"):
+            self.last_run_artifacts["sell_side_source_count"] = source_count
+            self.last_run_artifacts["sell_side_readable_count"] = readable_count
         print("\n📄 转换为Word文档...")
-        self.convert_to_docx(output_file)
+        docx_file = self.convert_to_docx(output_file)
+        if docx_file:
+            self.last_run_artifacts["combined_docx"] = docx_file
+        manifest_file = os.path.join(report_dir, "manifest.json")
+        with open(manifest_file, "w", encoding="utf-8") as manifest:
+            json.dump(
+                {
+                    "run_id": self.run_id,
+                    "company": self.target_company,
+                    "code": self.target_company_code,
+                    "market": self.target_company_market,
+                    "company_identity_verified": getattr(
+                        self, "company_identity_verified", True
+                    ),
+                    "analysis_mode": getattr(self, "analysis_mode", "agent"),
+                    **self.last_run_artifacts,
+                },
+                manifest,
+                ensure_ascii=False,
+                indent=2,
+            )
         
         print(f"\n✅ 第二阶段完成！深度研报已保存到: {output_file}")
         return output_file
     
     def run_full_pipeline(self):
         """运行完整流程"""
+        if not self.api_key and self.analysis_mode == "agent" and isinstance(self.llm, LLMHelper):
+            raise RuntimeError(
+                "完整研报生成需要模型密钥；请在 .env 配置 OPENAI_API_KEY、"
+                "OPENAI_BASE_URL 和 OPENAI_MODEL"
+            )
         print("\n" + "="*100)
         print("🎯 启动整合的金融研报生成流程")
         print("="*100)
@@ -506,12 +645,35 @@ class IntegratedResearchReportGenerator:
     
     def analyze_individual_company(self, company_name, files, llm_config, query=None, verbose=True):
         """分析单个公司"""
+        if self.analysis_mode == "baseline":
+            return {"final_report": financial_baseline_report(company_name, files)}
+        try:
+            baseline = financial_baseline_report(company_name, files)
+        except ValueError:
+            # HK and other provider CSVs may use a different schema. Preserve
+            # the original interactive agent instead of aborting its run.
+            baseline = ""
         if query is None:
             query = "基于表格的数据，分析有价值的内容，并绘制相关图表。最后生成汇报给我。"
         report = quick_analysis(
             query=query, files=files, llm_config=llm_config, 
-            absolute_path=True, max_rounds=20
+            absolute_path=True, max_rounds=self.analysis_rounds
         )
+        if not isinstance(report, dict):
+            return {"final_report": (
+                baseline + "\n\n> 交互式分析未返回报告，本节使用程序计算基线。"
+                if baseline else "交互式分析未返回报告，且无可计算的财务基线。"
+            )}
+        final_text = str(report.get("final_report") or "").strip()
+        if len(final_text) < 100 or "报告生成失败" in final_text:
+            report["final_report"] = (
+                baseline + "\n\n> 交互式分析未完成，本节使用程序计算基线。"
+                if baseline else "交互式分析未完成，且无可计算的财务基线。"
+            )
+        else:
+            report["final_report"] = (
+                baseline + "\n\n" + final_text if baseline else final_text
+            )
         return report
     
     def format_final_reports(self, all_reports):
@@ -537,6 +699,13 @@ class IntegratedResearchReportGenerator:
     
     def compare_two_companies(self, company1_name, company1_files, company2_name, company2_files, llm_config):
         """比较两个公司"""
+        if self.analysis_mode == "baseline":
+            return {"final_report": (
+                "## 同行财务指标对照\n\n"
+                + financial_baseline_report(company1_name, company1_files)
+                + "\n\n"
+                + financial_baseline_report(company2_name, company2_files)
+            )}
         query = "基于两个公司的表格的数据，分析有共同点的部分，绘制对比分析的表格，并绘制相关图表。最后生成汇报给我。"
         all_files = company1_files + company2_files
         report = quick_analysis(
@@ -544,7 +713,7 @@ class IntegratedResearchReportGenerator:
             files=all_files,
             llm_config=llm_config,
             absolute_path=True,
-            max_rounds=20
+            max_rounds=self.analysis_rounds
         )
         return report
     
@@ -648,11 +817,22 @@ class IntegratedResearchReportGenerator:
                 yaml_block = outline_list
             parts = yaml.safe_load(yaml_block)
             if isinstance(parts, dict):
-                parts = list(parts.values())
+                parts = parts.get('parts') or parts.get('sections') or []
         except Exception as e:
             print(f"[大纲yaml解析失败] {e}")
             parts = []
-        return parts
+        if not isinstance(parts, list) or not parts or any(
+            not isinstance(part, dict) or not str(part.get('part_title') or '').strip()
+            for part in parts
+        ):
+            print("[大纲格式不完整] 使用固定研究框架继续生成自研报告")
+            parts = [
+                {"part_title": "公司与财务事实"},
+                {"part_title": "投资逻辑与待核实假设"},
+                {"part_title": "风险提示与监测指标"},
+                {"part_title": "资料来源与分析限制"},
+            ]
+        return parts[:8]
     
     def generate_section(self, llm, part_title, prev_content, background, report_content, is_last):
         """生成章节"""
@@ -734,18 +914,22 @@ class IntegratedResearchReportGenerator:
                 "-o",
                 docx_output,
                 "--standalone",
-                "--resource-path=.",
-                "--extract-media=."
+                f"--resource-path={os.path.dirname(os.path.abspath(output_file))}",
             ]
             env = os.environ.copy()
             env['PYTHONIOENCODING'] = 'utf-8'
             subprocess.run(pandoc_cmd, check=True, capture_output=True, text=True, encoding='utf-8', env=env)
             print(f"\n📄 Word版报告已生成: {docx_output}")
-        except subprocess.CalledProcessError as e:
-            print(f"[提示] pandoc转换失败。错误信息: {e.stderr}")
-            print("[建议] 检查图片路径是否正确，或使用 --extract-media 选项")
+            return docx_output
         except Exception as e:
-            print(f"[提示] 若需生成Word文档，请确保已安装pandoc。当前转换失败: {e}")
+            print(f"[提示] pandoc 不可用，使用内置 Word 转换：{e}")
+            try:
+                markdown_to_docx(output_file, docx_output)
+                print(f"📄 Word版报告已生成: {docx_output}")
+                return docx_output
+            except Exception as fallback_error:
+                print(f"[提示] Word 转换失败：{fallback_error}")
+                return None
     
     # ========== 图片处理相关方法 ==========
     
@@ -850,6 +1034,13 @@ class IntegratedResearchReportGenerator:
 def main():
     """主函数"""
     import argparse
+
+    # Windows pipes and terminals may still use GBK; emoji in legacy progress
+    # messages must not stop the report before data collection starts.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     
     # 添加命令行参数支持
     parser = argparse.ArgumentParser(description='整合的金融研报生成器')
@@ -861,6 +1052,10 @@ def main():
     parser.add_argument('--no-sell-side-review', action='store_true', help='关闭卖方研报对照')
     parser.add_argument('--sell-side-days', type=int, default=90, help='检索最近多少天的卖方研报')
     parser.add_argument('--sell-side-max-reports', type=int, default=3, help='最多对照几家券商')
+    parser.add_argument('--max-competitors', type=int, default=3, help='最多采集多少家同行（0-5）')
+    parser.add_argument('--analysis-mode', choices=['auto', 'agent', 'baseline'], default='auto',
+                        help='财务分析方式；auto 在无模型密钥时使用可复算财务基线')
+    parser.add_argument('--analysis-rounds', type=int, default=20, help='交互式财务分析最多轮数')
     parser.add_argument('--as-of', type=date.fromisoformat, default=None, help='研报检索截止日 YYYY-MM-DD')
     
     args = parser.parse_args()
@@ -875,16 +1070,28 @@ def main():
             normalize_a_share_code(args.code)
             if market == "A" else normalize_hk_code(args.code)
         )
-        if args.company:
-            company = args.company
-        elif market == "A":
-            company = lookup_a_share_company(code)
-        elif code == "00020":
-            company = "商汤科技"
-        else:
-            company = lookup_hk_company(code)
     except ValueError as exc:
         parser.error(str(exc))
+    company_identity_verified = True
+    if args.company:
+        company = args.company
+    elif market == "A":
+        try:
+            company = lookup_a_share_company(code)
+        except ValueError as exc:
+            # Public name services may fail even when financial data is
+            # available. Keep the stock-code-only entry point usable, while
+            # visibly marking the unresolved identity in the final report.
+            print(f"公司名称查询不可用：{exc}；本次以股票代码 {code} 标识。")
+            company = code
+            company_identity_verified = False
+    elif code == "00020":
+        company = "商汤科技"
+    else:
+        try:
+            company = lookup_hk_company(code)
+        except ValueError as exc:
+            parser.error(str(exc))
     generator = IntegratedResearchReportGenerator(
         target_company=company,
         target_company_code=code,
@@ -894,7 +1101,11 @@ def main():
         sell_side_days=args.sell_side_days,
         sell_side_max_reports=args.sell_side_max_reports,
         sell_side_as_of=args.as_of,
+        max_competitors=args.max_competitors,
+        analysis_mode=args.analysis_mode,
+        analysis_rounds=args.analysis_rounds,
     )
+    generator.company_identity_verified = company_identity_verified
     
     # 运行完整流程
     basic_report, deep_report = generator.run_full_pipeline()

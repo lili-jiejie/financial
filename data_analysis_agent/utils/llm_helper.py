@@ -15,7 +15,7 @@ class LLMHelper:
     def __init__(self, config: LLMConfig = None):
         self.config = config
     
-    async def async_call(self, prompt: str, system_prompt: str = None, max_tokens: int = None, temperature: float = None) -> str:
+    async def async_call(self, prompt: str, system_prompt: str = None, max_tokens: int = None, temperature: float = None, response_format=None) -> str:
         """异步调用LLM"""
         messages = []
         if system_prompt:
@@ -32,6 +32,10 @@ class LLMHelper:
             kwargs['temperature'] = temperature
         else:
             kwargs['temperature'] = self.config.temperature
+        if self.config.reasoning_effort:
+            kwargs['reasoning_effort'] = self.config.reasoning_effort
+        if response_format is not None:
+            kwargs['response_format'] = response_format
             
         client = AsyncFallbackOpenAIClient(
             primary_api_key=self.config.api_key,
@@ -50,10 +54,10 @@ class LLMHelper:
         finally:
             await client.close()
 
-    def call(self, prompt: str, system_prompt: str = None, max_tokens: int = None, temperature: float = None) -> str:
+    def call(self, prompt: str, system_prompt: str = None, max_tokens: int = None, temperature: float = None, response_format=None) -> str:
         """同步调用LLM"""
         def run_call():
-            return asyncio.run(self.async_call(prompt, system_prompt, max_tokens, temperature))
+            return asyncio.run(self.async_call(prompt, system_prompt, max_tokens, temperature, response_format))
 
         try:
             asyncio.get_running_loop()

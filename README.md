@@ -2,10 +2,6 @@
 
 🤖 **基于AI大模型的智能金融研报生成平台**
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![OpenAI](https://img.shields.io/badge/LLM-OpenAI%20Compatible-orange.svg)](https://openai.com)
-
 ## 📋 项目简介
 
 本项目是一个基于AI大模型的金融研报自动生成系统，专为金融分析师、投资者和研究机构设计。通过整合多源数据采集、智能数据分析和专业报告生成功能，实现了从数据获取到研报输出的全流程自动化。
@@ -167,13 +163,6 @@ financial_research_report/
 
 ### 安装步骤
 
-1. **克隆项目**
-
-```bash
-git clone https://github.com/li-xiu-qi/financial_research_report
-cd financial_research_report
-```
-
 2. **安装依赖**
 
 ```bash
@@ -325,36 +314,3 @@ flow.run(shared_data)
 - 同业对比范围
 - 风险评估标准
 - 报告详细程度
-
-## 🤝 贡献指南
-
-欢迎贡献代码和功能改进！
-
-1. Fork本项目
-2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送分支 (`git push origin feature/AmazingFeature`)
-5. 创建Pull Request
-
-## 📜 免责声明
-
-- 本系统生成的研报仅供参考，不构成投资建议
-- 数据来源于公开渠道，准确性以官方披露为准
-- 投资有风险，决策需谨慎
-- AI生成内容可能存在偏差，请结合专业判断使用
-
-## 📞 技术支持
-
-如有问题或建议，请通过以下方式联系：
-
-- 提交Issue到项目仓库
-- 参与项目讨论
-- 查看项目文档和示例
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
----
-
-**⭐ 如果这个项目对您有帮助，请给我们一个星标！**

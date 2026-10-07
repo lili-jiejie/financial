@@ -633,6 +633,7 @@ def _evidence_sentences(text: str) -> list[str]:
         span.strip()
         for span in spans
         if 8 <= len(span.strip()) <= 220
+        and not span.lstrip().startswith("|")
         and "[节选]" not in span
         and "[中间内容省略]" not in span
     ]

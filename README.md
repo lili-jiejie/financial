@@ -228,11 +228,11 @@ python -m utils.sell_side_review 300750 --as-of 2026-10-01 --days 90 --max-repor
 python -m utils.sell_side_review 300750 --report 自己生成的研报.md
 ```
 
-默认的 `--analysis-mode auto` 在已配置模型密钥时沿用原项目的交互式财务分析代理，未配置时使用本次财务 CSV 计算年度指标并形成保守的自研基线。`--analysis-mode baseline` 可显式采用后者，适合不稳定的小型本地模型。模型配置沿用 `.env` 中的 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`；可选的 `OPENAI_REASONING_EFFORT` 会透传给支持该参数的兼容接口。原交互式代理返回无效报告时，财务分析会回退到程序计算基线。无密钥运行不会调用原交互式代理或模型；风险清单根据公开原文和固定核查规则生成，并明确标注为规则化对照。`--sources-only` 只列来源，不生成对照或风险清单。
+默认的 `--analysis-mode auto` 在已配置模型密钥时沿用原项目的交互式财务分析代理和分章写作；未配置时使用本次财务 CSV 生成**规则化自研财务研究稿**，包括收入与盈利、现金流、资产负债、存货及相应的风险监测项。无密钥模式不会生成经业务研判的竞争分析、盈利预测、估值或投资评级，不能当作模型版深度研报。`--analysis-mode baseline` 可显式采用规则化模式，适合不稳定的小型本地模型。模型配置沿用 `.env` 中的 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`；可选的 `OPENAI_REASONING_EFFORT` 会透传给支持该参数的兼容接口。原交互式代理返回无效报告时，财务分析会回退到程序计算基线。无密钥运行不会调用原交互式代理或模型；卖方风险清单根据公开原文和固定核查规则生成，并明确标注为规则化对照。`--sources-only` 只列来源，不生成对照或风险清单。
 
 每次完整运行保存在 `outputs/runs/<运行编号>/`：`基础资料与分析.md`、`自研报告.md`、`卖方对照与风险评估.md`、**`综合投研报告.md`**、`综合投研报告.docx`、`manifest.json` 和本次 CSV 输入。综合报告先给自研分析，再给卖方原文对照及风险评估；`manifest.json` 记录分析方式、来源篇数、可读篇数和对照状态。若系统安装了 Pandoc，Word 使用 Pandoc 转换；否则使用内置转换保留正文、表格与来源网址。
 
-[宁德时代完整合并示例](outputs/sell_side_complete_demo_300750.md)展示无密钥、真实公开来源的完整产物，包括自研财务分析、三家券商预测原文、观点核查与风险监测表。[来源清单示例](outputs/sell_side_demo_300750.md)仅用于检查检索能力；[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)说明资料不足时的表现。
+[宁德时代无密钥合并示例](outputs/sell_side_complete_demo_300750.md)展示真实公开来源下的规则化自研财务研究稿、三家券商预测原文、观点核查与风险监测表；它不是模型版深度研报的示例。仓库没有模型密钥，因此尚未对真实模型版完整报告做端到端验收。[来源清单示例](outputs/sell_side_demo_300750.md)仅用于检查检索能力；[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)说明资料不足时的表现。
 
 默认对照最近 90 天内最多三家不同券商；`--as-of` 可固定检索截止日，完整流程还支持 `--sell-side-days`、`--sell-side-max-reports`、`--max-competitors`、`--analysis-rounds` 和 `--no-sell-side-review`。`--as-of` 只是日期过滤，不是历史时点的数据快照，不能直接用于无前瞻信息的回测。
 

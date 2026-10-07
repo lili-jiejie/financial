@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
@@ -72,12 +73,20 @@ def markdown_to_docx(markdown_path: str | Path, output_path: str | Path) -> Path
             while index < len(lines) and lines[index].strip().startswith("|"):
                 rows.append(_cells(lines[index]))
                 index += 1
-            if "年度" in headers and "营业收入" in headers:
+            numeric_year_table = (
+                headers and headers[0] == "年度" and len(headers) <= 7
+                and rows and all(len(value) <= 24 for row in rows for value in row)
+            )
+            if numeric_year_table:
                 table = document.add_table(rows=1, cols=len(headers))
                 table.style = "Table Grid"
                 table.autofit = True
                 for cell, value in zip(table.rows[0].cells, headers):
                     cell.text = value
+                header_properties = table.rows[0]._tr.get_or_add_trPr()
+                repeat_header = OxmlElement("w:tblHeader")
+                repeat_header.set(qn("w:val"), "true")
+                header_properties.append(repeat_header)
                 for values in rows:
                     for cell, value in zip(table.add_row().cells, values):
                         cell.text = value

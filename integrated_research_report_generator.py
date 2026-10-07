@@ -30,7 +30,10 @@ from utils.get_stock_intro import (
     normalize_hk_code,
 )
 from utils.search_engine import SearchEngine
-from utils.financial_baseline import financial_baseline_report
+from utils.financial_baseline import (
+    financial_baseline_report,
+    financial_research_report,
+)
 from utils.markdown_docx import markdown_to_docx
 from utils.sell_side_review import (
     SellSideReviewResult,
@@ -434,14 +437,12 @@ class IntegratedResearchReportGenerator:
             baseline = self.analysis_results.get("target_baseline", "")
             if "财务数据基线（程序计算）" not in baseline:
                 raise ValueError("程序计算的自研财务基线缺失，已停止生成合并报告")
+            company_files = self.get_company_files(self.data_dir).get(
+                self.target_company, []
+            )
             full_report = [
                 f"# {self.target_company}研究报告\n",
-                "## 独立财务分析\n\n" + baseline,
-                "## 初步结论与风险核查路径\n\n"
-                "本系统先核对营业收入、归母净利润、经营现金流与资产负债率的年度变化。"
-                "增长能否持续、利润率变化、回款和原材料成本是后续复核重点。"
-                "仅凭这些年度数据无法计算可靠的目标价或给出买卖评级；"
-                "新增的卖方观点会在下一部分逐条核对。",
+                financial_research_report(self.target_company, company_files),
             ]
         else:
             # Preserve the original interactive report-generation agent.

@@ -3,7 +3,10 @@
 import pandas as pd
 import pytest
 
-from utils.financial_baseline import financial_baseline_report
+from utils.financial_baseline import (
+    financial_baseline_report,
+    financial_research_report,
+)
 
 
 def test_baseline_uses_year_end_values_and_keeps_missing_cells_empty(tmp_path):
@@ -77,3 +80,37 @@ def test_baseline_rejects_year_end_rows_without_recognized_metrics(tmp_path):
     )
     with pytest.raises(ValueError, match="缺少可读取的年度财务数据"):
         financial_baseline_report("测试公司", [path])
+
+
+def test_research_report_calculates_profitability_cash_and_inventory(tmp_path):
+    income = tmp_path / "公司_A_300750_income_statement_年度.csv"
+    balance = tmp_path / "公司_A_300750_balance_sheet_年度.csv"
+    cash = tmp_path / "公司_A_300750_cash_flow_statement_年度.csv"
+    pd.DataFrame({
+        "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+        "TOTAL_OPERATE_INCOME": [120e8, 100e8],
+        "OPERATE_COST": [90e8, 80e8],
+        "TOTAL_OPERATE_COST": [96e8, 87e8],
+        "PARENT_NETPROFIT": [20e8, 10e8],
+    }).to_csv(income, index=False)
+    pd.DataFrame({
+        "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+        "TOTAL_ASSETS": [200e8, 100e8],
+        "TOTAL_LIABILITIES": [80e8, 60e8],
+        "MONETARYFUNDS": [40e8, 30e8],
+        "INVENTORY": [15e8, 10e8],
+    }).to_csv(balance, index=False)
+    pd.DataFrame({
+        "REPORT_DATE": ["2025-12-31", "2024-12-31"],
+        "NETCASH_OPERATE": [30e8, 12e8],
+    }).to_csv(cash, index=False)
+
+    report = financial_research_report("测试公司", [income, balance, cash])
+    assert "本节是系统根据本次采集的年度报表独立计算" in report
+    assert "营收同比 +20.0%" in report
+    assert "毛利率为 25.0%，较 2024 年变动 +5.0 个百分点" in report
+    assert "经营现金流/归母净利润为 1.50 倍" in report
+    assert "资产负债率 40.0%，较 2024 年变动 -20.0 个百分点" in report
+    assert "存货 15.00 亿，同比 +50.0%" in report
+    assert "风险评估与监测" in report
+    assert "不计算目标价或投资评级" in report

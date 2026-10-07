@@ -1,4 +1,5 @@
 from docx import Document
+from docx.oxml.ns import qn
 
 from utils.markdown_docx import markdown_to_docx
 
@@ -19,3 +20,16 @@ def test_word_fallback_keeps_own_analysis_risk_table_and_source_url(tmp_path):
     assert "风险评估" in text
     assert "原料价格" in text
     assert "https://example.com/report" in text
+
+
+def test_word_fallback_keeps_short_annual_metrics_as_tables(tmp_path):
+    source = tmp_path / "自研报告.md"
+    source.write_text(
+        "# 财务分析\n\n| 年度 | 营收同比 | 毛利率 |\n"
+        "| --- | ---: | ---: |\n| 2025 | 20.0% | 25.0% |\n",
+        encoding="utf-8",
+    )
+    document = Document(markdown_to_docx(source, tmp_path / "自研报告.docx"))
+    assert len(document.tables) == 1
+    assert document.tables[0].cell(1, 1).text == "20.0%"
+    assert document.tables[0].rows[0]._tr.trPr.find(qn("w:tblHeader")) is not None

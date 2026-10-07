@@ -1247,6 +1247,9 @@ def test_code_only_pipeline_without_model_produces_combined_markdown_and_word(
     assert Path(basic_path).is_file()
     combined = Path(combined_path).read_text(encoding="utf-8")
     assert "| 2025 | 120.00 | 20.00 | 30.00 |" in combined
+    assert "## 收入、利润与盈利能力" in combined
+    assert "## 现金流、资产结构与营运资金" in combined
+    assert "## 自研风险评估与监测" in combined
     assert "自研与卖方观点的证据对照" in combined
     assert "风险评估与后续监测" in combined
     assert "原材料价格大幅波动" in combined

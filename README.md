@@ -108,35 +108,15 @@ financial_research_report/
 ├── 📁 工作流框架
 │   └── pocketflow/                         # 轻量级工作流引擎
 │       └── __init__.py
-├── 📁 数据存储
-│   ├── company_info/                       # 公司基础信息
-│   │   ├── 百度_HK_09888_info.txt
-│   │   ├── 寒武纪_A_SH688256_info.txt
-│   │   ├── 科大讯飞_A_SZ002230_info.txt
-│   │   ├── 商汤科技_HK_00020_info.txt
-│   │   └── 云从科技_A_SH688327_info.txt
-│   ├── download_financial_statement_files/ # 财务报表数据
-│   │   ├── [公司名]_balance_sheet_年度.csv  # 资产负债表
-│   │   ├── [公司名]_cash_flow_statement_年度.csv # 现金流量表
-│   │   └── [公司名]_income_statement_年度.csv    # 利润表
-│   └── industry_info/                      # 行业信息
-│       └── all_search_results.json        # 搜索结果汇总
-├── 📁 输出结果
-│   └── outputs/                            # 生成的报告和图表
-│       ├── runs/[市场]_[代码]_[运行时间]/  # 每次完整运行及其 inputs/
-│       ├── sell_side_complete_demo_300750.md # 完整合并示例
-│       ├── sell_side_demo_300750.md       # 无模型密钥的公开来源示例
-│       ├── sell_side_no_coverage_demo_600478.md # 无公开覆盖示例
-│       └── session_[ID]/                   # 按会话分组的输出
-│           ├── 经营活动现金流趋势.png
-│           ├── 净利润趋势.png
-│           ├── 营业收入趋势.png
-│           └── 资产与权益趋势.png
-├── 📄 配置文件
-│   ├── requirements.txt                    # Python依赖包
-│   └── LICENSE                            # 开源许可证
-└── 📄 文档
-    └── README.md                          # 项目说明文档
+├── 📁 运行产物（本地生成，不纳入版本库）
+│   ├── outputs/runs/[市场]_[代码]_[运行时间]/ # 每次完整运行及其输入
+│   ├── company_info/                       # 公司基础信息缓存
+│   ├── download_financial_statement_files/ # 财务报表缓存
+│   └── industry_info/                      # 行业信息缓存
+├── 📁 示例
+│   └── outputs/sell_side_complete_demo_300750.md # 完整合并示例
+├── requirements.txt                        # Python 依赖
+└── README.md                               # 项目说明
 ```
 
 ## 🚀 核心特性
@@ -232,7 +212,7 @@ python -m utils.sell_side_review 300750 --report 自己生成的研报.md
 
 每次完整运行保存在 `outputs/runs/<运行编号>/`：`基础资料与分析.md`、`自研报告.md`、`卖方对照与风险评估.md`、**`综合投研报告.md`**、`综合投研报告.docx`、`manifest.json` 和本次 CSV 输入。综合报告先给自研分析，再给卖方原文对照及风险评估；`manifest.json` 记录分析方式、来源篇数、可读篇数和对照状态。若系统安装了 Pandoc，Word 使用 Pandoc 转换；否则使用内置转换保留正文、表格与来源网址。
 
-[宁德时代无密钥合并示例](outputs/sell_side_complete_demo_300750.md)展示真实公开来源下的规则化自研财务研究稿、三家券商预测原文、观点核查与风险监测表；它不是模型版深度研报的示例。仓库没有模型密钥，因此尚未对真实模型版完整报告做端到端验收。[来源清单示例](outputs/sell_side_demo_300750.md)仅用于检查检索能力；[无近期公开覆盖示例](outputs/sell_side_no_coverage_demo_600478.md)说明资料不足时的表现。
+[宁德时代无密钥合并示例](outputs/sell_side_complete_demo_300750.md)展示真实公开来源下的规则化自研财务研究稿、三家券商预测原文、观点核查与风险监测表；它不是模型版深度研报的示例。仓库没有模型密钥，因此尚未对真实模型版完整报告做端到端验收。历史运行结果和下载缓存已从版本库移除，新的运行结果仍会保存在本地 `outputs/runs/`。
 
 默认对照最近 90 天内最多三家不同券商；`--as-of` 可固定检索截止日，完整流程还支持 `--sell-side-days`、`--sell-side-max-reports`、`--max-competitors`、`--analysis-rounds` 和 `--no-sell-side-review`。`--as-of` 只是日期过滤，不是历史时点的数据快照，不能直接用于无前瞻信息的回测。
 

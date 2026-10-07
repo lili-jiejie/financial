@@ -5,6 +5,17 @@ __pycache__/*.pyc
 outputs/inputs/
 outputs/runs/
 outputs/full_pipeline_*.log
+/outputs/session_*/
+/outputs/sell_side_demo_*.md
+/outputs/sell_side_no_coverage_demo_*.md
+/company_info/
+/download_financial_statement_files/
+/industry_info/
+/images/
+/财务研报汇总_*.md
+/财务研报汇总_*.pdf
+/深度财务研报分析_*.md
+/深度财务研报分析_*.pdf
 .venv/
 .venv_clean/
 **/__pycache__/
